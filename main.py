@@ -4,7 +4,7 @@ import logging
 from typing import Optional
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-WAVESPEED_API_KEY = os.environ.get("WAVESPEED_API_KEY", "")
 SUBMIT_URL = "https://api.wavespeed.ai/api/v3/google/nano-banana-pro/text-to-image"
 RESULT_URL_TEMPLATE = "https://api.wavespeed.ai/api/v3/predictions/{prediction_id}/result"
 POLL_INTERVAL = float(os.environ.get("POLL_INTERVAL_SECONDS", "2"))
@@ -52,16 +51,16 @@ class GenerateResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Core helpers
 # ---------------------------------------------------------------------------
-def _headers() -> dict:
-    if not WAVESPEED_API_KEY:
-        raise HTTPException(status_code=500, detail="WAVESPEED_API_KEY environment variable is not set.")
+def _headers(api_key: str) -> dict:
+    if not api_key:
+        raise HTTPException(status_code=401, detail="API Key is missing.")
     return {
-        "Authorization": f"Bearer {WAVESPEED_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
 
-async def _submit_job(client: httpx.AsyncClient, prompt: str, seed: int, size: str) -> str:
+async def _submit_job(client: httpx.AsyncClient, api_key: str, prompt: str, seed: int, size: str) -> str:
     """Submit a single image generation job and return its prediction ID."""
     payload = {
         "enable_base64_output": False,
@@ -71,7 +70,7 @@ async def _submit_job(client: httpx.AsyncClient, prompt: str, seed: int, size: s
         "size": size,
     }
     logger.info("Submitting job for prompt: %s", prompt[:80])
-    resp = await client.post(SUBMIT_URL, json=payload, headers=_headers())
+    resp = await client.post(SUBMIT_URL, json=payload, headers=_headers(api_key))
     resp.raise_for_status()
     data = resp.json()
     prediction_id = data["data"]["id"]
@@ -79,7 +78,7 @@ async def _submit_job(client: httpx.AsyncClient, prompt: str, seed: int, size: s
     return prediction_id
 
 
-async def _poll_until_done(client: httpx.AsyncClient, prediction_id: str) -> dict:
+async def _poll_until_done(client: httpx.AsyncClient, api_key: str, prediction_id: str) -> dict:
     """
     Poll the result endpoint every POLL_INTERVAL seconds until the job is
     completed or failed, or until POLL_TIMEOUT seconds have elapsed.
@@ -93,7 +92,7 @@ async def _poll_until_done(client: httpx.AsyncClient, prediction_id: str) -> dic
         await asyncio.sleep(POLL_INTERVAL)
         elapsed += POLL_INTERVAL
 
-        resp = await client.get(url, headers=_headers())
+        resp = await client.get(url, headers=_headers(api_key))
         resp.raise_for_status()
         body = resp.json()
         status = body.get("data", {}).get("status", "")
@@ -107,12 +106,12 @@ async def _poll_until_done(client: httpx.AsyncClient, prediction_id: str) -> dic
 
 
 async def _generate_one(
-    client: httpx.AsyncClient, prompt: str, seed: int, size: str
+    client: httpx.AsyncClient, api_key: str, prompt: str, seed: int, size: str
 ) -> ImageResult:
     """Submit + poll a single prompt and wrap in ImageResult."""
     try:
-        prediction_id = await _submit_job(client, prompt, seed, size)
-        result = await _poll_until_done(client, prediction_id)
+        prediction_id = await _submit_job(client, api_key, prompt, seed, size)
+        result = await _poll_until_done(client, api_key, prediction_id)
 
         data = result.get("data", {})
         status = data.get("status", "unknown")
@@ -145,7 +144,10 @@ async def health():
 
 
 @app.post("/generate", response_model=GenerateResponse)
-async def generate(request: GenerateRequest):
+async def generate(
+    request: GenerateRequest,
+    x_wavespeed_api_key: str = Header(..., description="WaveSpeed API Key supplied by client")
+):
     """
     Submit ALL prompts to WaveSpeed AI concurrently, poll EVERY job until it
     completes (or fails / times out), then return the full results as JSON.
@@ -155,7 +157,7 @@ async def generate(request: GenerateRequest):
     async with httpx.AsyncClient(timeout=POLL_TIMEOUT + 30) as client:
         # Fire all jobs concurrently and wait for ALL to finish
         tasks = [
-            _generate_one(client, prompt, request.seed, request.size)
+            _generate_one(client, x_wavespeed_api_key, prompt, request.seed, request.size)
             for prompt in request.prompts
         ]
         results: list[ImageResult] = await asyncio.gather(*tasks)
