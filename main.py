@@ -71,7 +71,10 @@ async def _submit_job(client: httpx.AsyncClient, api_key: str, prompt: str, seed
     }
     logger.info("Submitting job for prompt: %s", prompt[:80])
     resp = await client.post(SUBMIT_URL, json=payload, headers=_headers(api_key))
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        error_body = resp.text
+        logger.error("WaveSpeed API error %s: %s", resp.status_code, error_body)
+        raise HTTPException(status_code=resp.status_code, detail=f"WaveSpeed API error: {error_body}")
     data = resp.json()
     prediction_id = data["data"]["id"]
     logger.info("Job submitted. prediction_id=%s", prediction_id)
