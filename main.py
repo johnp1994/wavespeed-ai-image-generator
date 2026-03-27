@@ -146,14 +146,14 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@app.post("/generate", response_model=list[ImageResult])
 async def generate(
     request: GenerateRequest,
     x_wavespeed_api_key: str = Header(..., description="WaveSpeed API Key supplied by client")
 ):
     """
     Submit ALL prompts to WaveSpeed AI concurrently, poll EVERY job until it
-    completes (or fails / times out), then return the full results as JSON.
+    completes (or fails / times out), then return the flat list of results.
 
     The response is only sent once every single job has finished.
     """
@@ -165,4 +165,4 @@ async def generate(
         ]
         results: list[ImageResult] = await asyncio.gather(*tasks)
 
-    return GenerateResponse(results=results)
+    return results
